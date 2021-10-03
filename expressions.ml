@@ -157,21 +157,164 @@ let lex_multi_char_token (l: char list) : (token * char list) option =
     in lex_multi_char_token' l 0
 ;;
 
-let rec lex' (l: char list) : token list =
-    match l with
+let rec lex' (l:char list) : token list =
+  match l with
     | [] -> []
     | ' '::cs -> lex' cs
     | c::cs ->
-            let (token, l) =  (
-                match c with
-                | '+' -> (BinopT Add, cs)
-                | '-' -> (BinopT Sub, cs)
-                | '*' -> (BinopT Mul, cs)
-                | '^' -> (BinopT Pow, cs)
-                | '(' -> (LParen, cs)
-                | ')' -> (RParen, cs)
-                | '{' -> (LBrace, cs)
-                | '}' -> (RBrace, cs)
-                | _ -> (
-                    match lex_number l with
-                    | Some
+	let (token, l') =
+	  (match c with
+	   | '+' -> (BinopT Add, cs)
+	   | '-' -> (BinopT Sub, cs)
+	   | '*' -> (BinopT Mul, cs)
+	   | '^' -> (BinopT Pow, cs)
+	   | '~' -> (NegT, cs)
+	   | '(' -> (LParen, cs)
+	   | ')' -> (RParen, cs)
+	   | '{' -> (LBrace, cs)
+	   | '}' -> (RBrace, cs)
+	   | _ ->
+	       (match lex_number l with
+		| Some (t, l') -> (t, l')
+		| None ->
+		    (match lex_multi_char_token l with
+		     | Some (t, l') -> (t, l')
+		     | None -> raise (ParseError "Unrecognized token"))))
+	in token :: lex' l' ;;
+
+let lex s = lex' (string_to_char_list s) @ [EOF] ;;
+
+let parse s =
+  let rec parse_toplevel_expression (l:token list) : expression =
+    let (e,_,_) = parse_delimited_expression l EOF prec_bound in e
+
+  and parse_expression (l:token list) : expression * token list =
+    match l with
+    | [] -> raise (ParseError "Unexpected end of string")
+    | t::ts ->
+        match t with
+        | LParen ->
+	    let (e,l',_) = parse_delimited_expression ts RParen prec_bound in
+	      (e,l')
+        | RParen -> raise (ParseError "Unexpected rparen")
+        | LBrace ->
+	    let (e,l',_) = parse_delimited_expression ts RBrace prec_bound in
+	      (e,l')
+        | RBrace -> raise (ParseError "Unexpected rbrace")
+        | NegT -> parse_unop ts
+        | VarT -> (Var, ts)
+        | EOF -> raise (ParseError "Unexpected EOF")
+        | NumT n -> (Num n, ts)
+        | BinopT b ->
+	    raise (ParseError ("Unexpected Binop: " ^ token_to_string t))
+
+    and parse_binop (l:token list) (delim:token) (current_prec:int) eq
+        : expression * token list * bool =
+      match l with
+      | [] -> raise (ParseError "Unexpected end of string 2")
+      | t::ts ->
+          if t = delim then (eq,ts,true) else
+            match t with
+              | BinopT b ->
+                  let prec = binop_precedence b in
+                    if current_prec <= prec then (eq,l,false)
+                    else
+		      let (eq2,l',d) =
+                        parse_delimited_expression ts delim prec in
+                      if d then (Binop(b,eq,eq2),l',true)
+                      else parse_binop l' delim current_prec
+                        (Binop(b,eq,eq2))
+              | _ ->
+		  raise
+		    (ParseError
+                       ("Expecting Binop, but found: " ^ token_to_string t))
+
+    and parse_delimited_expression (l:token list) (delim:token)
+        (current_prec:int) : expression * token list * bool =
+      match l with
+        | [] -> raise (ParseError "Unexpected end of string 3")
+        | t::ts ->
+            if t = delim then
+              raise (ParseError ("Unexpected delim: " ^ token_to_string delim))
+            else
+              let (eq,l') = parse_expression l in
+                parse_binop l' delim current_prec eq
+
+    and parse_unop tokens =
+      let (e,t) = parse_expression tokens in (Neg e,t)
+
+    in parse_toplevel_expression (lex s)
+;;
+
+let rec fold_expr (e: expression)
+    (f: float -> 'a)
+    (v: 'a)
+    (b: binop -> 'a -> 'a -> 'a)
+    (n: 'a -> 'a) =
+        match e with
+        | Var -> v
+        | Binop (bi, e1, e2) -> b bi (fold_expr e1 f v b n) (fold_expr e2 f v b n)
+        | Num fl -> f fl
+        | Neg e1 -> n (fold_expr e1 f v b n)
+;;
+
+let rec power a n =
+    match n with
+    | 0 -> 1
+    | n -> a * (power a (n-1))
+;;
+
+let b bi e1 e2 =
+    match bi with
+    | Add -> e1 + e2
+    | Sub -> e1 - e2
+    | Mul -> e1 * e2
+    | Pow -> power e1 e2
+;;
+
+let rec contains_var (e: expression)  : bool =
+    fold_expr e (fun f -> false) true (fun b e1 e2 -> (e1 || e2)) (fun n -> false)
+;;
+
+let b (bi: binop) (e1: float) (e2: float) : float =
+    match b with
+    | Add -> e1 +. e2
+    | Sub -> e1 -. e2
+    | Mul -> e1 *. e2
+    | Pow -> e1 ** e2
+;;
+
+let rec evaluate (e: expression) (x: float) : float =
+    fold_expr e (fun f -> f) x b (fun n -> -. n)
+;;
+
+exception NotPolynomial
+
+let rec derivative (e: expression) : expression =
+    match e with
+    | Neg expr -> Neg (derivative expr)
+    | Var -> Num 1.0
+    | Num x -> Num 0.0
+    | Binop (bi, e1, e2) ->
+            match bi with
+            | Add ->
+                    if (contains_var e1) then
+                        if (contains_var e2) then Binop (Add, (derivative e1), (derivative e2))
+                        else Binop (Add, (derivative e1), Num 0.0)
+                    else
+                        if (contains_var e2) then Binop (Add, Num 0.0, (derivative e2))
+                        else Num 0.0
+            | Sub ->
+                    if (contains_var e1) then
+                        if (contains_var e2) then Binop (Sub, (derivative e1), (derivative e2))
+                        else Binop (Sub, (derivative e1), Num 0.0)
+                    else
+                        if (contains_var e2) then Binop (Sub, Num 0.0, (derivative e2))
+                        else Num 0.0
+            | Mul -> Binop (Add, Binop (Mul, e2, (derivative e1)), Binop (Mul, e1, (derivative e2)))
+            | Pow ->
+                    if (contains_var e2) then raise NotPolynomial
+                    else
+                        if (contains_var e1) then Binop (Mul, Binop (Mul, e2, Binop (Pow, e1, Binop (Sub, e2, Num 1.0))), derivative e1)
+                        else Binop (bi, e1, e2)
+;;
