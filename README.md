@@ -1,2 +1,2 @@
-# arithmetic-expressions
+# Arithmetic Expression Parser
 Simple arithmetic expression parser using Ocaml
