@@ -33,3 +33,6 @@ For example, we could represent `-3.0x^2 + 2.0` as
 ```
 Binop (Add, Binop (Mul, Binop (Pow, Var, Num 2.0)), Num 2.0)
 ```
+
+Parsing and evalutating only support functions with one variable `x`. Including 
+different variables other than `x` would raise `ParseError`.
